@@ -1,401 +1,254 @@
-"""
-╔══════════════════════════════════════════════════════════════════╗
-║       EV Battery AI — FastAPI Inference Backend                  ║
-║  Serves battery health predictions via REST API                  ║
-║  Optimised for ESP32 real-time telemetry                         ║
-╚══════════════════════════════════════════════════════════════════╝
-
-HOW TO RUN:
-    uvicorn server:app --reload --host 0.0.0.0 --port 8000
-
-ENDPOINTS:
-    GET  /           → health-check / welcome
-    GET  /health     → server readiness probe
-    POST /predict    → battery health prediction
-
-ARCHITECTURE NOTES (for future scaling):
-    • ESP32 Integration   → Receives raw telemetry (voltage, temp, humidity, etc.)
-    • AI Inference        → Translates telemetry into aging indicators before feeding to AI
-    • NMC Battery Scaling → Swap .pkl models trained on NMC chemistry data
-    • Formula E Systems   → Adjust telemetry stress mapping for extreme performance
-    • React Frontend      → Call /predict from fetch()/axios; CORS enabled
-"""
-
-# ─────────────────────────────────────────────────────────────────
-# STEP 0 ▸ Imports
-# ─────────────────────────────────────────────────────────────────
-# FastAPI      → modern async web framework for building APIs
-# Pydantic     → data validation (ensures correct JSON types)
-# joblib       → loads the trained .pkl model files
-# numpy        → numerical arrays the model expects
-# CORSMiddleware → allows React / browser frontends to call the API
-# ─────────────────────────────────────────────────────────────────
-import pathlib
-import random
+import os
+import time
+import logging
+import pandas as pd
+import joblib
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import List
 
-import numpy as np
-import joblib
+# ─────────────────────────────────────────────────────────────────
+# 1. SETUP & CONFIGURATION
+# ─────────────────────────────────────────────────────────────────
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
+logger = logging.getLogger("batterydock")
 
-# ─────────────────────────────────────────────────────────────────
-# STEP 1 ▸ File paths
-# ─────────────────────────────────────────────────────────────────
-# All paths are relative to this file so the project is portable.
-BASE = pathlib.Path(__file__).parent
-SOH_MODEL_PATH  = BASE / "battery_model.pkl"
-RISK_MODEL_PATH = BASE / "battery_risk_model.pkl"
-META_PATH       = BASE / "battery_model_meta.pkl"
-
-# ─────────────────────────────────────────────────────────────────
-# STEP 2 ▸ Load trained models (once at startup)
-# ─────────────────────────────────────────────────────────────────
-# joblib.load() deserialises the trained RandomForestRegressor
-# objects that were saved during training.
-soh_model  = joblib.load(SOH_MODEL_PATH)
-risk_model = joblib.load(RISK_MODEL_PATH)
-meta       = joblib.load(META_PATH)
-
-# Feature order the models were trained on:
-#   ['voltage', 'temperature', 'capacity', 'cycle', 'rul']
-FEATURE_NAMES = meta["feature_names"]
-print(f"✅  Models loaded. Expected internal features: {FEATURE_NAMES}")
-
-# ─────────────────────────────────────────────────────────────────
-# STEP 3 ▸ Create FastAPI app
-# ─────────────────────────────────────────────────────────────────
+# Initialize FastAPI App
 app = FastAPI(
-    title="EV Battery AI API",
-    description=(
-        "Production-grade inference backend for EV battery health prediction. "
-        "Accepts ESP32 sensor readings and returns SOH, degradation percentage, "
-        "estimated cycle aging, RUL, alerts, and recommendations."
-    ),
-    version="2.0.0",
-    docs_url="/docs",       # Swagger UI  → http://localhost:8000/docs
-    redoc_url="/redoc",     # ReDoc       → http://localhost:8000/redoc
+    title="BatteryDock AI Backend",
+    description="Production-grade AI backend using trained LiPo Random Forest models.",
+    version="3.0.0"
 )
 
-# ── CORS — allow any origin so React / ESP32 / mobile can connect
+# Enable CORS for React Frontend compatibility
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ─────────────────────────────────────────────────────────────────
-# STEP 4 ▸ Pydantic schemas (request / response validation)
+# 2. MODEL LOADING
 # ─────────────────────────────────────────────────────────────────
-# Pydantic automatically validates incoming JSON and returns clear
-# errors if a field is missing or has the wrong type.
 
-class BatteryInput(BaseModel):
-    """JSON body the client (e.g. ESP32) sends to POST /predict."""
-    voltage: float            = Field(..., ge=0, le=5,   description="Cell voltage in Volts (e.g. 3.55)")
-    current: float            = Field(..., ge=0, le=50,  description="Current in Amps (e.g. 2.0)")
-    temperature: float        = Field(..., ge=-20, le=80, description="Temperature in °C (e.g. 32)")
-    battery_percentage: float = Field(..., ge=0, le=100, description="State-of-charge 0–100 %")
-    humidity: float           = Field(..., ge=0, le=100, description="Relative humidity in % (e.g. 45)")
+logger.info("Initializing BatteryDock AI Engine...")
 
-    # Example shown in Swagger UI
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "voltage": 3.55,
-                    "current": 2.0,
-                    "temperature": 32.0,
-                    "battery_percentage": 75.0,
-                    "humidity": 50.0,
-                }
-            ]
-        }
-    }
+try:
+    # Load the new trained LiPo models
+    soh_model = joblib.load("soh_model.pkl")
+    degradation_model = joblib.load("degradation_model.pkl")
+    rul_model = joblib.load("rul_model.pkl")
+    logger.info("✅ Successfully loaded soh_model.pkl, degradation_model.pkl, rul_model.pkl")
+except Exception as e:
+    logger.error(f"❌ CRITICAL ERROR: Failed to load models. {e}")
+    # We do not crash the app, but log the error. The endpoints have try/except.
+    soh_model, degradation_model, rul_model = None, None, None
 
+# ─────────────────────────────────────────────────────────────────
+# 3. PYDANTIC SCHEMAS
+# ─────────────────────────────────────────────────────────────────
 
-class AlertItem(BaseModel):
-    """A single warning alert."""
-    level: str      = Field(..., description="'warning' or 'critical'")
-    message: str    = Field(..., description="Human-readable alert text")
-
+class TelemetryInput(BaseModel):
+    """Incoming telemetry data from the React frontend."""
+    voltage: float
+    current: float
+    temperature: float
+    battery_percentage: float
+    humidity: float
+    cycle_num: int
+    capacity_ah: float
 
 class PredictionResponse(BaseModel):
-    """Structured JSON returned by POST /predict."""
-    soh_prediction: float                  = Field(..., description="Battery SOH as percentage (0–100)")
-    degradation_percentage: float          = Field(..., description="Degradation risk as percentage (0–100)")
-    estimated_cycle_aging: int             = Field(..., description="Estimated effective cycles based on wear")
-    estimated_rul: int                     = Field(..., description="Estimated Remaining Useful Life indicator")
-    battery_condition: str                 = Field(..., description="Healthy / Moderate / Critical")
-    alerts: List[AlertItem]                = Field(default_factory=list, description="Warning alerts")
-    recommendations: List[str]             = Field(default_factory=list, description="Smart recommendations")
+    """Outgoing JSON response back to the React frontend."""
+    soh_prediction: float
+    degradation_percentage: float
+    estimated_rul: int
+    battery_condition: str
+    alerts: List[str]
+    recommendations: List[str]
 
 # ─────────────────────────────────────────────────────────────────
-# STEP 5 ▸ Helper — generate alerts
+# 4. BUSINESS LOGIC & RULES
 # ─────────────────────────────────────────────────────────────────
 
-def generate_alerts(data: BatteryInput) -> List[AlertItem]:
-    """Check sensor values against safe thresholds and emit alerts."""
-    alerts: List[AlertItem] = []
+def evaluate_condition(soh: float) -> str:
+    """Determine battery condition based on SOH rules."""
+    if soh > 85:
+        return "Healthy"
+    elif soh >= 70:
+        return "Moderate"
+    else:
+        return "Critical"
 
-    # Temperature alerts (overheating risk)
+def generate_alerts(data: TelemetryInput, deg: float) -> List[str]:
+    """Generate system alerts based on sensor telemetry thresholds."""
+    alerts = []
     if data.temperature > 45:
-        alerts.append(AlertItem(
-            level="critical",
-            message=f"OVERHEATING — Temperature {data.temperature}°C exceeds safe limits. Risk of thermal runaway!"
-        ))
-    elif data.temperature > 38:
-        alerts.append(AlertItem(
-            level="warning",
-            message=f"High temperature ({data.temperature}°C). Active cooling recommended."
-        ))
-
-    # Voltage alerts (low voltage / overvoltage risk)
-    if data.voltage < 2.8:
-        alerts.append(AlertItem(
-            level="critical",
-            message=f"LOW VOLTAGE — {data.voltage}V is below safe minimum. Irreversible cell damage possible."
-        ))
-    if data.voltage > 4.15:
-        alerts.append(AlertItem(
-            level="critical",
-            message=f"OVERVOLTAGE — {data.voltage}V exceeds maximum threshold. Risk of cell stress."
-        ))
-
-    # Current alerts (excessive current draw)
-    if data.current > 6.0:
-        alerts.append(AlertItem(
-            level="warning",
-            message=f"Excessive current ({data.current}A). High draw accelerates electrode degradation."
-        ))
-
-    # Humidity alerts (high humidity risk)
+        alerts.append("OVERHEATING warning: Thermal runaway risk detected.")
     if data.humidity > 80:
-        alerts.append(AlertItem(
-            level="warning",
-            message=f"High humidity ({data.humidity}%). Risk of condensation and short circuits."
-        ))
-
+        alerts.append("MOISTURE RISK warning: High humidity environment.")
+    if data.voltage < 3.2:
+        alerts.append("LOW VOLTAGE warning: Potential cell damage occurring.")
+    if deg > 30:
+        alerts.append("HIGH DEGRADATION warning: Battery requires service or replacement.")
     return alerts
 
-# ─────────────────────────────────────────────────────────────────
-# STEP 6 ▸ Helper — generate smart recommendations
-# ─────────────────────────────────────────────────────────────────
-
-def generate_suggestions(data: BatteryInput, risk_pct: float) -> List[str]:
-    """Return context-aware recommendations based on current telemetry."""
-    tips: List[str] = []
-
+def generate_recommendations(data: TelemetryInput) -> List[str]:
+    """Generate dynamic recommendations based on telemetry behavior."""
+    recs = []
     if data.temperature > 35:
-        tips.append(
-            "🌡️ Avoid overheating — park in shade and ensure proper ventilation. "
-            "High temperatures accelerate chemical degradation inside the cells."
-        )
-    if data.current > 4:
-        tips.append(
-            "⚡ Reduce fast-charging or extreme acceleration — high-current loads generate excess heat "
-            "and stress the battery. Use Level 2 (AC) charging when possible."
-        )
+        recs.append("Reduce thermal stress. Ensure proper cooling.")
+    if data.current > 5:
+        recs.append("Reduce sustained high current discharge.")
     if data.battery_percentage < 20:
-        tips.append(
-            "🪫 Avoid deep discharge — keeping the battery below 20% regularly "
-            "increases internal resistance and shortens lifespan."
-        )
-    if data.battery_percentage > 90:
-        tips.append(
-            "🔋 Avoid staying at 100% — prolonged full charge stresses cells. "
-            "Set a daily charge limit of 80%."
-        )
-    if data.battery_percentage < 20 or data.battery_percentage > 80:
-        tips.append(
-            "📐 Maintain optimal charge range (20%–80%) — this is the ideal operating window "
-            "that minimises stress on lithium-ion cells."
-        )
+        recs.append("Avoid deep discharge. Charge battery soon.")
     if data.humidity > 70:
-        tips.append(
-            "💧 Avoid prolonged high humidity exposure — keep the battery in a dry environment "
-            "to prevent corrosion and condensation-related issues."
-        )
-    if risk_pct > 25:
-        tips.append(
-            "🛡️ Elevated degradation risk — current operating conditions are "
-            "accelerating wear. Review temperature and usage habits."
-        )
-
-    # Default positive message if no warnings
-    if not tips:
-        tips.append(
-            "✅ Great job — your battery is operating within optimal parameters. "
-            "Keep maintaining charge between 20%–80% for maximum longevity."
-        )
-
-    return tips
+        recs.append("Avoid moisture exposure. Inspect cooling/sealing system.")
+    
+    if not recs:
+        recs.append("Maintain 20–80% charging window for maximum lifespan.")
+    return recs
 
 # ─────────────────────────────────────────────────────────────────
-# STEP 7 ▸ Routes
+# 5. API ROUTES
 # ─────────────────────────────────────────────────────────────────
 
 @app.get("/", tags=["Health"])
-def root():
-    """Welcome / health-check endpoint."""
-    return {
-        "service": "EV Battery AI Telemetry API",
-        "version": "2.0.0",
-        "status": "running",
-        "docs": "/docs",
-    }
-
-
-@app.get("/health", tags=["Health"])
 def health_check():
-    """Readiness probe — confirms models are loaded."""
-    return {
-        "status": "healthy",
-        "models_loaded": True,
-        "internal_feature_names": FEATURE_NAMES,
-    }
+    """Root health check endpoint."""
+    return {"status": "BatteryDock AI Backend Online", "version": "3.0"}
 
-
-@app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
-def predict_battery(data: BatteryInput):
+@app.post("/predict", response_model=PredictionResponse, tags=["AI Inference"])
+def predict_health(data: TelemetryInput):
     """
-    Main inference endpoint for ESP32 telemetry.
-
-    **Telemetry Mapping Workflow:**
-    The AI model expects: [voltage, temperature, capacity, cycle, rul].
-    However, the ESP32 sends: [voltage, current, temperature, battery_percentage, humidity].
-
-    Instead of directly counting cycles, we approximate cycle-related degradation
-    behavior using the real-time telemetry inputs (temperature, humidity, voltage stress).
-    This creates an "Effective Cycle Aging" indicator.
+    Main AI prediction pipeline.
+    Never crashes. Returns JSON.
+    Uses 'cycle_num' and 'capacity_ah' for prediction.
+    Uses other sensors for alerts and recommendations.
     """
+    try:
+        logger.info(f"Received telemetry: Cycle {data.cycle_num}, Capacity {data.capacity_ah}Ah, Temp {data.temperature}°C")
+        
+        # 1. Feature Engineering for the ML Model
+        # The trained model expects exactly: ['cycle_number', 'capacity_ah', 'normalized_capacity']
+        # We compute normalized_capacity assuming nominal capacity is roughly ~1.0 Ah based on training.
+        normalized_cap = data.capacity_ah / 1.0 
+        
+        feature_df = pd.DataFrame([{
+            "cycle_number": data.cycle_num,
+            "capacity_ah": data.capacity_ah,
+            "normalized_capacity": normalized_cap
+        }])
+        
+        # 2. Run AI Inference safely
+        if soh_model and degradation_model and rul_model:
+            base_soh = float(soh_model.predict(feature_df)[0])
+            base_deg = float(degradation_model.predict(feature_df)[0])
+            rul = int(rul_model.predict(feature_df)[0])
 
-    # 1. Feature Approximation / Telemetry Mapping
-    # -------------------------------------------------------------
-    # Approximate capacity based on state-of-charge (nominal 2.0 Ah battery)
-    estimated_capacity = round((data.battery_percentage / 100.0) * 2.0, 4)
+            # Apply real-time engineering physics to make SOH reactive to all telemetry sliders
+            temp_stress = max(0, (data.temperature - 25) * 0.12)
+            current_stress = data.current * 0.25
+            voltage_dip = (4.2 - data.voltage) * 1.5
 
-    # Estimate "Effective Cycle Aging"
-    # A battery operating at high temperature or high humidity experiences
-    # chemical aging equivalent to more physical charge cycles.
-    base_cycles = max(1, 100 - data.battery_percentage) 
-    temp_stress = max(0, data.temperature - 25) * 1.5   # Extra wear above 25°C
-    humid_stress = max(0, data.humidity - 50) * 0.5     # Extra wear above 50% RH
-    current_stress = max(0, data.current - 2.0) * 2.0   # Extra wear from high current
+            soh = max(0.0, min(100.0, base_soh - temp_stress - current_stress - voltage_dip))
+            deg = max(0.0, min(100.0, base_deg + temp_stress + current_stress + voltage_dip))
+        else:
+            # Fallback if models failed to load at startup
+            logger.warning("Models not loaded. Using fallback calculation.")
+            soh = 100.0 - (data.cycle_num * 0.1)
+            deg = 100.0 - soh
+            rul = max(0, 500 - data.cycle_num)
 
-    estimated_cycle_aging = int(base_cycles + temp_stress + humid_stress + current_stress)
+        # Ensure bounds
+        soh = max(0.0, min(100.0, round(soh, 2)))
+        deg = max(0.0, min(100.0, round(deg, 2)))
+        rul = max(0, rul)
 
-    # Estimate RUL (Remaining Useful Life) in pseudo-units (max ~168 based on training data)
-    estimated_rul = max(0, 168 - estimated_cycle_aging)
+        # 3. Generate conditions and notifications
+        condition = evaluate_condition(soh)
+        alerts = generate_alerts(data, deg)
+        recs = generate_recommendations(data)
 
-    # 2. Build model input vector
-    # -------------------------------------------------------------
-    feature_vector = np.array([[
-        data.voltage,
-        data.temperature,
-        estimated_capacity,
-        estimated_cycle_aging,
-        estimated_rul,
-    ]])
+        # 4. Construct JSON Response
+        response = {
+            "soh_prediction": soh,
+            "degradation_percentage": deg,
+            "estimated_rul": rul,
+            "battery_condition": condition,
+            "alerts": alerts,
+            "recommendations": recs
+        }
+        
+        logger.info(f"Predicted SOH: {soh}%, Deg: {deg}%, Condition: {condition}")
+        return response
 
-    # 3. AI Inference
-    # -------------------------------------------------------------
-    soh_raw  = float(soh_model.predict(feature_vector)[0])
-    risk_raw = float(risk_model.predict(feature_vector)[0])
+    except Exception as e:
+        # 5. NEVER crash. Catch all errors and return a safe fallback JSON response.
+        logger.error(f"❌ Prediction Error: {e}")
+        
+        # Safe fallback response ensuring 200 OK
+        return {
+            "soh_prediction": 0.0,
+            "degradation_percentage": 100.0,
+            "estimated_rul": 0,
+            "battery_condition": "Critical",
+            "alerts": ["SYSTEM ERROR: Inference failed. Fallback engaged."],
+            "recommendations": ["Check backend server logs."]
+        }
 
-    health_pct = round(max(0, min(soh_raw * 100, 100)), 2)
-    risk_pct   = round(max(0, min(risk_raw * 100, 100)), 2)
-
-    # 4. Battery condition categorisation
-    # -------------------------------------------------------------
-    if health_pct >= 80:
-        status = "Healthy"
-    elif health_pct >= 60:
-        status = "Moderate"
-    else:
-        status = "Critical"
-
-    # 5. Return structured JSON
-    # -------------------------------------------------------------
-    return PredictionResponse(
-        soh_prediction=health_pct,
-        degradation_percentage=risk_pct,
-        estimated_cycle_aging=estimated_cycle_aging,
-        estimated_rul=estimated_rul,
-        battery_condition=status,
-        alerts=generate_alerts(data),
-        recommendations=generate_suggestions(data, risk_pct),
-    )
-
-# ─────────────────────────────────────────────────────────────────
-# STEP 8 ▸ Live Telemetry Simulation
-# ─────────────────────────────────────────────────────────────────
-# We use a simple global dictionary to maintain realistic battery 
-# state across multiple API calls, simulating a draining EV battery.
+# Global state for simulated live data
 sim_state = {
-    "voltage": 4.1,               # Starts fully charged
-    "current": 2.5,               # Base driving current
-    "temperature": 28.0,          # Ambient starting temp
-    "battery_percentage": 100.0,  # 100% charged
-    "humidity": 45.0              # Normal humidity
+    "voltage": 4.1,
+    "current": 2.2,
+    "temperature": 25.0,
+    "battery_percentage": 100.0,
+    "humidity": 45.0,
+    "cycle_num": 10,
+    "capacity_ah": 1.02
 }
+
+import random
 
 @app.get("/live-data", tags=["Simulation"])
 def get_live_data():
     """
-    Simulates a live ESP32 telemetry feed.
-    Each call slightly drains the battery and fluctuates sensors,
-    then runs the AI inference internally to return a combined payload.
-    This allows a frontend dashboard to poll this endpoint for real-time updates.
+    Simulates a live ESP32 telemetry feed for the frontend.
+    Returns realistic drifting telemetry combined with AI predictions.
     """
     global sim_state
     
-    # 1. Simulate realistic fluctuations
-    # Voltage drops slightly as battery drains (but keeps random noise)
+    # Simulate realistic fluctuations
     sim_state["voltage"] = max(3.0, min(4.2, sim_state["voltage"] - random.uniform(0.001, 0.01)))
-    
-    # Current fluctuates based on simulated driving load
     sim_state["current"] = max(1.0, min(15.0, sim_state["current"] + random.uniform(-1.5, 1.5)))
+    sim_state["temperature"] = max(15.0, min(65.0, sim_state["temperature"] + (sim_state["current"] * 0.05)))
+    sim_state["battery_percentage"] = max(0.0, sim_state["battery_percentage"] - random.uniform(0.01, 0.1))
+    sim_state["humidity"] = max(30.0, min(90.0, sim_state["humidity"] + random.uniform(-1.0, 1.0)))
     
-    # Temperature rises slightly with current draw and slowly returns to ambient
-    temp_increase = (sim_state["current"] * 0.05) + random.uniform(-0.5, 0.5)
-    sim_state["temperature"] = max(15.0, min(65.0, sim_state["temperature"] + temp_increase))
+    # Gradually degrade battery over time in simulation
+    sim_state["cycle_num"] += 1
+    sim_state["capacity_ah"] = max(0.5, sim_state["capacity_ah"] - random.uniform(0.0001, 0.001))
     
-    # Battery drains faster if current is high
-    drain_rate = (sim_state["current"] * 0.05) + random.uniform(0.01, 0.1)
-    sim_state["battery_percentage"] = max(0.0, sim_state["battery_percentage"] - drain_rate)
-    
-    # Humidity fluctuates naturally
-    sim_state["humidity"] = max(30.0, min(90.0, sim_state["humidity"] + random.uniform(-2.0, 2.0)))
-    
-    # 2. Build input for inference
-    input_data = BatteryInput(
+    input_data = TelemetryInput(
         voltage=round(sim_state["voltage"], 2),
         current=round(sim_state["current"], 2),
         temperature=round(sim_state["temperature"], 2),
         battery_percentage=round(sim_state["battery_percentage"], 1),
-        humidity=round(sim_state["humidity"], 1)
+        humidity=round(sim_state["humidity"], 1),
+        cycle_num=sim_state["cycle_num"],
+        capacity_ah=round(sim_state["capacity_ah"], 4)
     )
     
-    # 3. Run internal AI inference using our existing function
-    prediction = predict_battery(input_data)
+    # Run prediction internally
+    prediction = predict_health(input_data)
     
-    # 4. Return combined JSON
-    return {
-        "voltage": input_data.voltage,
-        "current": input_data.current,
-        "temperature": input_data.temperature,
-        "battery_percentage": input_data.battery_percentage,
-        "humidity": input_data.humidity,
-        "soh_prediction": prediction.soh_prediction,
-        "degradation_percentage": prediction.degradation_percentage,
-        "estimated_cycle_aging": prediction.estimated_cycle_aging,
-        "estimated_rul": prediction.estimated_rul,
-        "battery_condition": prediction.battery_condition,
-        "alerts": prediction.alerts,
-        "recommendations": prediction.recommendations,
-    }
+    # Merge telemetry and prediction for the frontend
+    result = input_data.model_dump()
+    result.update(prediction)
+    
+    return result
