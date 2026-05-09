@@ -7,6 +7,15 @@ import AIIntelligence from './components/AIIntelligence';
 import TrendCharts from './components/TrendCharts';
 import VehicleGraphic from './components/VehicleGraphic';
 import TelemetryMonitor from './components/TelemetryMonitor';
+import { Wifi } from 'lucide-react';
+
+// ============================================================================
+// ESP32 HARDWARE CONFIGURATION
+// Paste your ESP32's IP address here. Include "http://"
+// Example: "http://192.168.1.15" or "http://192.168.1.15/data"
+// ============================================================================
+const ESP32_IP = "http://192.168.1.X";
+
 
 // ─────────────────────────────────────────────────────────────
 // Axios instance — single source of truth for API base URL
@@ -43,7 +52,8 @@ const App = () => {
   const [history, setHistory] = useState([]);
 
   // UI flags
-  const [isLive, setIsLive] = useState(false);
+  // Modes: 'manual' (sliders), 'mock' (simulated drift), 'esp32' (real hardware)
+  const [telemetryMode, setTelemetryMode] = useState('manual');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -124,100 +134,114 @@ const App = () => {
     }
   }, []);
 
-  /**
-   * fetchLiveData — polls backend for live telemetry
-   * 
-   * PRIORITY ORDER:
-   *   1. GET /latest — real ESP32 hardware data (if ESP32 is connected)
-   *   2. GET /live-data — simulation fallback (if no ESP32)
-   * 
-   * This creates a seamless pipeline:
-   *   ESP32 connected → dashboard shows real hardware data
-   *   ESP32 absent → dashboard shows simulated drift
-   */
-  const fetchLiveData = useCallback(async () => {
-    setError(null);
-    try {
-      // First, try to get real ESP32 data from /latest
-      const latestResponse = await api.get('/latest');
-      const latestData = latestResponse.data;
-
-      let data;
-      if (latestData.status === 'waiting_for_esp32') {
-        // No ESP32 connected — fall back to simulation
-        const simResponse = await api.get('/live-data');
-        data = simResponse.data;
-        console.log("LIVE TELEMETRY (SIMULATION)", data);
-      } else {
-        // Real ESP32 data available!
-        data = latestData;
-        console.log("LIVE ESP32 DATA", data);
-      }
-
-      // Map backend field names back to frontend state keys
-      const updatedTelemetry = {
-        voltage: data.voltage,
-        current: data.current,
-        temperature: data.temperature,
-        battery_percentage: data.battery_percentage,
-        humidity: data.humidity,
-        cycle: data.cycle_num,
-        capacity: data.capacity_ah,
-      };
-
-      // Sync sliders + prediction cards simultaneously
-      setTelemetry(updatedTelemetry);
-      setPredictionData(data);
-
-      // Build complete history snapshot
-      const newPoint = {
-        time: new Date().toLocaleTimeString(),
-        voltage: data.voltage,
-        current: data.current,
-        temperature: data.temperature,
-        battery_percentage: data.battery_percentage,
-        humidity: data.humidity,
-        cycle: data.cycle_num,
-        capacity: data.capacity_ah,
-        soh_prediction: data.soh_prediction,
-        degradation_percentage: data.degradation_percentage,
-        estimated_rul: data.estimated_rul,
-      };
-
-      console.log("NEW HISTORY POINT", newPoint);
-
-      setHistory(prev => {
-        const updated = [...prev.slice(-19), newPoint];
-        console.log("UPDATED HISTORY", updated);
-        return updated;
-      });
-
-    } catch (err) {
-      console.error("❌ Live Feed Error:", err.message);
-      setError("Live Feed Disconnected. Check backend.");
-      setIsLive(false);
-    }
-  }, []);
-
-  // ═══════════════════════════════════════════════════════════
-  // 3. EFFECTS — controls when API calls fire
-  // ═══════════════════════════════════════════════════════════
-
-  // (A) Initial fetch on mount — runs exactly once
-  useEffect(() => {
-    if (!initialFetchDone.current) {
-      initialFetchDone.current = true;
-      fetchPrediction(telemetry);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // (B) Live mode polling loop — 2 second interval
   useEffect(() => {
-    if (!isLive) return;
-    const id = setInterval(fetchLiveData, 2000);
+    if (telemetryMode === 'manual') return;
+
+    const id = setInterval(async () => {
+      if (telemetryMode === 'mock') {
+        // ====================================================================
+        // [TASK 1] SAFE MOCK DATA PRESERVATION
+        // This is the fallback testing mode using existing simulated backend logic.
+        // It hits /live-data which returns a continuous simulated drift.
+        // ====================================================================
+        try {
+          setError(null);
+          const response = await api.get('/live-data');
+          const data = response.data;
+
+          console.log("[MOCK MODE] LIVE TELEMETRY", data);
+
+          const updatedTelemetry = {
+            voltage: data.voltage,
+            current: data.current,
+            temperature: data.temperature,
+            battery_percentage: data.battery_percentage,
+            humidity: data.humidity,
+            cycle: data.cycle_num,
+            capacity: data.capacity_ah,
+          };
+
+          setTelemetry(updatedTelemetry);
+          setPredictionData(data);
+
+          const newPoint = {
+            time: new Date().toLocaleTimeString(),
+            ...updatedTelemetry,
+            soh_prediction: data.soh_prediction,
+            degradation_percentage: data.degradation_percentage,
+            estimated_rul: data.estimated_rul,
+          };
+          setHistory(prev => [...prev.slice(-19), newPoint]);
+        } catch (err) {
+          console.error("❌ Mock Feed Error:", err.message);
+          setError("Mock Feed Disconnected. Check backend.");
+          setTelemetryMode('manual');
+        }
+      } else if (telemetryMode === 'esp32') {
+        // ====================================================================
+        // [TASK 3] REAL ESP32 TELEMETRY FETCHING
+        // Connects to the ESP32 IP address, gets real JSON telemetry,
+        // and sends it into the existing backend prediction pipeline.
+        // ====================================================================
+        try {
+          setError(null);
+          // 1. Fetch real hardware data from ESP32 IP
+          const espResponse = await axios.get(ESP32_IP, { timeout: 3000 });
+          const rawData = espResponse.data;
+
+          console.log("[ESP32 LIVE MODE] RAW HARDWARE DATA", rawData);
+
+          // 2. Prepare payload mapping for backend
+          const payload = {
+            voltage: rawData.voltage || 0,
+            current: rawData.current || 0,
+            temperature: rawData.temperature || 0,
+            battery_percentage: rawData.battery_percentage || 0,
+            humidity: rawData.humidity || 0,
+            cycle_num: rawData.cycle || 0,
+            capacity_ah: rawData.capacity || 0,
+          };
+
+          // 3. Send real telemetry into existing backend prediction flow
+          const predictionResponse = await api.post('/predict', payload);
+          const aiData = predictionResponse.data;
+
+          console.log("[ESP32 LIVE MODE] BACKEND PREDICTION", aiData);
+
+          // 4. Update frontend using REAL ESP32 data + AI Prediction
+          const updatedTelemetry = {
+            voltage: payload.voltage,
+            current: payload.current,
+            temperature: payload.temperature,
+            battery_percentage: payload.battery_percentage,
+            humidity: payload.humidity,
+            cycle: payload.cycle_num,
+            capacity: payload.capacity_ah,
+          };
+
+          setTelemetry(updatedTelemetry);
+          setPredictionData(aiData);
+
+          const newPoint = {
+            time: new Date().toLocaleTimeString(),
+            ...updatedTelemetry,
+            soh_prediction: aiData.soh_prediction,
+            degradation_percentage: aiData.degradation_percentage,
+            estimated_rul: aiData.estimated_rul,
+          };
+          setHistory(prev => [...prev.slice(-19), newPoint]);
+
+        } catch (err) {
+          console.error("❌ ESP32 Connection Error:", err.message);
+          setError(`ESP32 Unreachable at ${ESP32_IP}. Falling back to manual mode.`);
+          setTelemetryMode('manual');
+        }
+      }
+    }, 2000);
+    
     return () => clearInterval(id);
-  }, [isLive, fetchLiveData]);
+  }, [telemetryMode]);
 
   // ═══════════════════════════════════════════════════════════
   // 4. SLIDER HANDLER — debounced 300ms
@@ -235,7 +259,7 @@ const App = () => {
    *   6. React rerenders gauges, charts, monitor, etc.
    */
   const handleInputChange = (field, value) => {
-    if (isLive) return; // sliders locked during live mode
+    if (telemetryMode !== 'manual') return; // sliders locked during live/mock modes
 
     const newTelemetry = { ...telemetry, [field]: parseFloat(value) };
     setTelemetry(newTelemetry);
@@ -277,13 +301,26 @@ const App = () => {
             </div>
           )}
 
-          <button
-            onClick={() => setIsLive(!isLive)}
-            className={`btn-live ${isLive ? 'active' : ''}`}
-          >
-            <Activity size={16} className={isLive ? 'animate-pulse' : ''} />
-            {isLive ? 'LIVE TELEMETRY ACTIVE' : 'START LIVE FEED'}
-          </button>
+          {/* [TASK 5] LIVE TELEMETRY MODE TOGGLES */}
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <button
+              onClick={() => setTelemetryMode(telemetryMode === 'mock' ? 'manual' : 'mock')}
+              className={`btn-live ${telemetryMode === 'mock' ? 'active' : ''}`}
+              style={{ backgroundColor: telemetryMode === 'mock' ? 'rgba(249, 115, 22, 0.2)' : 'var(--bg-panel)', borderColor: telemetryMode === 'mock' ? 'rgba(249, 115, 22, 0.5)' : 'var(--border-glass)', color: telemetryMode === 'mock' ? '#fb923c' : 'white' }}
+            >
+              <Activity size={16} className={telemetryMode === 'mock' ? 'animate-pulse' : ''} />
+              {telemetryMode === 'mock' ? 'MOCK MODE ACTIVE' : 'MOCK MODE'}
+            </button>
+
+            <button
+              onClick={() => setTelemetryMode(telemetryMode === 'esp32' ? 'manual' : 'esp32')}
+              className={`btn-live ${telemetryMode === 'esp32' ? 'active' : ''}`}
+              style={{ backgroundColor: telemetryMode === 'esp32' ? 'rgba(59, 130, 246, 0.2)' : 'var(--bg-panel)', borderColor: telemetryMode === 'esp32' ? 'rgba(59, 130, 246, 0.5)' : 'var(--border-glass)', color: telemetryMode === 'esp32' ? '#60a5fa' : 'white' }}
+            >
+              <Wifi size={16} className={telemetryMode === 'esp32' ? 'animate-pulse' : ''} />
+              {telemetryMode === 'esp32' ? 'ESP32 CONNECTED' : 'ESP32 LIVE MODE'}
+            </button>
+          </div>
         </div>
       </motion.header>
 
@@ -319,7 +356,7 @@ const App = () => {
             <TelemetryControl
               telemetry={telemetry}
               onChange={handleInputChange}
-              disabled={isLive}
+              disabled={telemetryMode !== 'manual'}
             />
           </div>
 
