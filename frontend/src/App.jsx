@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, AlertTriangle, ShieldAlert, Navigation, Zap, Loader2, WifiOff } from 'lucide-react';
@@ -6,16 +6,26 @@ import TelemetryControl from './components/TelemetryControl';
 import AIIntelligence from './components/AIIntelligence';
 import TrendCharts from './components/TrendCharts';
 import VehicleGraphic from './components/VehicleGraphic';
+import TelemetryMonitor from './components/TelemetryMonitor';
 
-// Configure Axios defaults for backend communication
+// ─────────────────────────────────────────────────────────────
+// Axios instance — single source of truth for API base URL
+// ─────────────────────────────────────────────────────────────
 const api = axios.create({
   baseURL: 'http://127.0.0.1:8000',
-  timeout: 5000, // 5 second timeout to detect offline backend
+  timeout: 5000,
 });
 
+// ─────────────────────────────────────────────────────────────
+// App Component — Production Telemetry Dashboard
+// ─────────────────────────────────────────────────────────────
 const App = () => {
-  // --- STATE MANAGEMENT ---
-  
+
+  // ═══════════════════════════════════════════════════════════
+  // 1. STATE — all live data, no hardcoded values after init
+  // ═══════════════════════════════════════════════════════════
+
+  // Telemetry slider state (maps to backend TelemetryInput schema)
   const [telemetry, setTelemetry] = useState({
     voltage: 4.1,
     current: 2.2,
@@ -23,90 +33,128 @@ const App = () => {
     battery_percentage: 82.0,
     humidity: 45.0,
     cycle: 120,
-    capacity: 0.91
+    capacity: 0.91,
   });
 
-  // AI Prediction State (from FastAPI)
+  // AI prediction response from backend (null until first fetch)
   const [predictionData, setPredictionData] = useState(null);
-  
-  // History State for Recharts
+
+  // Chart history — array of snapshot objects, max 20
   const [history, setHistory] = useState([]);
-  
-  // UI States
+
+  // UI flags
   const [isLive, setIsLive] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  // Reference for debouncing manual slider inputs
-  const timeoutRef = useRef(null);
+  // Debounce timer ref (stable across renders)
+  const debounceRef = useRef(null);
 
-  // --- API INTEGRATION ---
+  // Track whether initial fetch has completed (prevents double-fire)
+  const initialFetchDone = useRef(false);
+
+  // ═══════════════════════════════════════════════════════════
+  // 2. API FUNCTIONS — useCallback to keep stable references
+  // ═══════════════════════════════════════════════════════════
 
   /**
-   * POSTs current manual telemetry to the FastAPI /predict endpoint.
-   * Updates AI intelligence and chart history.
+   * fetchPrediction — POST telemetry → backend → receive AI prediction
+   * 
+   * This is the CORE pipeline:
+   *   slider change → fetchPrediction → setPredictionData → UI rerenders
+   *   
+   * The function maps frontend field names (cycle, capacity) to
+   * backend field names (cycle_num, capacity_ah) before sending.
    */
-  const fetchPrediction = async (currentTelemetry) => {
+  const fetchPrediction = useCallback(async (currentTelemetry) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
-      // Map frontend state to backend expected schema
+      // Map frontend keys → backend Pydantic schema
       const payload = {
-        ...currentTelemetry,
-        cycle_num: currentTelemetry.cycle,
-        capacity_ah: currentTelemetry.capacity
-      };
-      
-      console.log("🚀 [API] Outgoing Telemetry Payload (POST /predict):", payload);
-      
-      const response = await api.post('/predict', payload);
-      const data = response.data;
-      
-      console.log("✅ [API] Backend Response Received:", data);
-      
-      // Update dashboard state with real intelligence
-      setPredictionData(data);
-      
-      // 3. Append LIVE SNAPSHOT to history
-      const newPoint = {
-        time: new Date().toLocaleTimeString(),
-        soh_prediction: data.soh_prediction,
-        degradation_percentage: data.degradation_percentage,
-        temperature: currentTelemetry.temperature,
         voltage: currentTelemetry.voltage,
         current: currentTelemetry.current,
+        temperature: currentTelemetry.temperature,
+        battery_percentage: currentTelemetry.battery_percentage,
+        humidity: currentTelemetry.humidity,
+        cycle_num: currentTelemetry.cycle,
+        capacity_ah: currentTelemetry.capacity,
       };
-      
+
+      console.log("LIVE TELEMETRY", payload);
+
+      const response = await api.post('/predict', payload);
+      const data = response.data;
+
+      console.log("BACKEND RESPONSE", data);
+
+      // Update prediction state → triggers rerender of gauges, cards, etc.
+      setPredictionData(data);
+
+      // Build a COMPLETE history snapshot with ALL required fields
+      const newPoint = {
+        time: new Date().toLocaleTimeString(),
+        voltage: currentTelemetry.voltage,
+        current: currentTelemetry.current,
+        temperature: currentTelemetry.temperature,
+        battery_percentage: currentTelemetry.battery_percentage,
+        humidity: currentTelemetry.humidity,
+        cycle: currentTelemetry.cycle,
+        capacity: currentTelemetry.capacity,
+        soh_prediction: data.soh_prediction,
+        degradation_percentage: data.degradation_percentage,
+        estimated_rul: data.estimated_rul,
+      };
+
       console.log("NEW HISTORY POINT", newPoint);
-      
+
+      // Append to history using immutable update — NEVER overwrite
       setHistory(prev => {
-        const updatedHistory = [...prev.slice(-19), newPoint];
-        console.log("FULL HISTORY", updatedHistory);
-        return updatedHistory;
+        const updated = [...prev.slice(-19), newPoint];
+        console.log("UPDATED HISTORY", updated);
+        return updated;
       });
-      
+
     } catch (err) {
-      console.error("❌ [API Error] Failed to fetch prediction:", err.message);
-      setError("Backend Offline or Timeout. Ensure FastAPI is running at http://127.0.0.1:8000.");
+      console.error("❌ [API Error]", err.message);
+      setError("Backend Offline. Ensure FastAPI runs at http://127.0.0.1:8000");
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
   /**
-   * GETs live simulated hardware telemetry from FastAPI /live-data endpoint.
-   * Completely replaces local fake math with actual backend stream.
+   * fetchLiveData — polls backend for live telemetry
+   * 
+   * PRIORITY ORDER:
+   *   1. GET /latest — real ESP32 hardware data (if ESP32 is connected)
+   *   2. GET /live-data — simulation fallback (if no ESP32)
+   * 
+   * This creates a seamless pipeline:
+   *   ESP32 connected → dashboard shows real hardware data
+   *   ESP32 absent → dashboard shows simulated drift
    */
-  const fetchLiveData = async () => {
+  const fetchLiveData = useCallback(async () => {
     setError(null);
     try {
-      console.log("📡 [API] Polling Live Telemetry Feed (GET /live-data)...");
-      const response = await api.get('/live-data');
-      const data = response.data;
-      
-      console.log("✅ [API] Live Feed Received:", data);
+      // First, try to get real ESP32 data from /latest
+      const latestResponse = await api.get('/latest');
+      const latestData = latestResponse.data;
 
+      let data;
+      if (latestData.status === 'waiting_for_esp32') {
+        // No ESP32 connected — fall back to simulation
+        const simResponse = await api.get('/live-data');
+        data = simResponse.data;
+        console.log("LIVE TELEMETRY (SIMULATION)", data);
+      } else {
+        // Real ESP32 data available!
+        data = latestData;
+        console.log("LIVE ESP32 DATA", data);
+      }
+
+      // Map backend field names back to frontend state keys
       const updatedTelemetry = {
         voltage: data.voltage,
         current: data.current,
@@ -114,92 +162,99 @@ const App = () => {
         battery_percentage: data.battery_percentage,
         humidity: data.humidity,
         cycle: data.cycle_num,
-        capacity: data.capacity_ah
+        capacity: data.capacity_ah,
       };
-      
-      // 2. Synchronize UI sliders and AI intelligence cards concurrently
+
+      // Sync sliders + prediction cards simultaneously
       setTelemetry(updatedTelemetry);
       setPredictionData(data);
-      
-      // 3. Push real-time data to charts
+
+      // Build complete history snapshot
       const newPoint = {
         time: new Date().toLocaleTimeString(),
+        voltage: data.voltage,
+        current: data.current,
+        temperature: data.temperature,
+        battery_percentage: data.battery_percentage,
+        humidity: data.humidity,
+        cycle: data.cycle_num,
+        capacity: data.capacity_ah,
         soh_prediction: data.soh_prediction,
         degradation_percentage: data.degradation_percentage,
-        temperature: updatedTelemetry.temperature,
-        voltage: updatedTelemetry.voltage,
-        current: updatedTelemetry.current,
+        estimated_rul: data.estimated_rul,
       };
-      
+
       console.log("NEW HISTORY POINT", newPoint);
-      
+
       setHistory(prev => {
-        const updatedHistory = [...prev.slice(-19), newPoint];
-        console.log("FULL HISTORY", updatedHistory);
-        return updatedHistory;
+        const updated = [...prev.slice(-19), newPoint];
+        console.log("UPDATED HISTORY", updated);
+        return updated;
       });
 
     } catch (err) {
-      console.error("❌ [API Error] Live Feed Disconnected:", err.message);
-      setError("Live Feed Disconnected. Check backend connection.");
-      setIsLive(false); // Auto-disable live mode on crash
+      console.error("❌ Live Feed Error:", err.message);
+      setError("Live Feed Disconnected. Check backend.");
+      setIsLive(false);
     }
-  };
+  }, []);
 
-  // --- REACT HOOKS (USE EFFECT) ---
+  // ═══════════════════════════════════════════════════════════
+  // 3. EFFECTS — controls when API calls fire
+  // ═══════════════════════════════════════════════════════════
 
-  // Initial load: Fetch baseline prediction on mount
+  // (A) Initial fetch on mount — runs exactly once
   useEffect(() => {
-    fetchPrediction(telemetry);
+    if (!initialFetchDone.current) {
+      initialFetchDone.current = true;
+      fetchPrediction(telemetry);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync Telemetry Changes to Backend (Debounced)
+  // (B) Live mode polling loop — 2 second interval
   useEffect(() => {
-    // Skip if in live mode (live mode handles its own polling)
-    if (isLive) return;
+    if (!isLive) return;
+    const id = setInterval(fetchLiveData, 2000);
+    return () => clearInterval(id);
+  }, [isLive, fetchLiveData]);
 
-    // Debounce the API call by 300ms to prevent overwhelming the server
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => {
-      fetchPrediction(telemetry);
-    }, 300);
-
-    return () => clearTimeout(timeoutRef.current);
-  }, [telemetry, isLive]);
-
-  // Live Telemetry Polling Loop
-  useEffect(() => {
-    let intervalId;
-    if (isLive) {
-      // Poll the backend every 1.5 seconds if LIVE mode is active
-      intervalId = setInterval(() => {
-        fetchLiveData();
-      }, 1500);
-    }
-    // Cleanup interval when component unmounts or live mode is toggled off
-    return () => clearInterval(intervalId);
-  }, [isLive]);
+  // ═══════════════════════════════════════════════════════════
+  // 4. SLIDER HANDLER — debounced 300ms
+  // ═══════════════════════════════════════════════════════════
 
   /**
-   * Handle manual slider inputs
-   * State update triggers the useEffect above to fetch new predictions
+   * handleInputChange — called by TelemetryControl on every slider drag
+   * 
+   * Flow:
+   *   1. Immediately update telemetry state (slider moves visually)
+   *   2. Clear any pending debounce timer
+   *   3. Set new 300ms timer to call fetchPrediction
+   *   4. When timer fires, backend receives new telemetry
+   *   5. Response updates predictionData + history
+   *   6. React rerenders gauges, charts, monitor, etc.
    */
   const handleInputChange = (field, value) => {
-    setTelemetry(prev => ({ ...prev, [field]: parseFloat(value) }));
+    if (isLive) return; // sliders locked during live mode
+
+    const newTelemetry = { ...telemetry, [field]: parseFloat(value) };
+    setTelemetry(newTelemetry);
+
+    // Debounce: wait 300ms after user stops dragging before hitting API
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      fetchPrediction(newTelemetry);
+    }, 300);
   };
 
-  const getSeverityColor = (severity) => {
-    if (severity === 'Critical') return 'text-red';
-    if (severity === 'Warning') return 'text-orange';
-    if (severity === 'Monitor') return 'text-yellow';
-    return 'text-green';
-  };
+  // ═══════════════════════════════════════════════════════════
+  // 5. RENDER — the dashboard
+  // ═══════════════════════════════════════════════════════════
 
   return (
     <div className="app-container">
-      {/* Premium Landing Hero Section */}
-      <motion.header 
+      {/* Header */}
+      <motion.header
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
         className="header"
@@ -213,17 +268,16 @@ const App = () => {
             AI Telemetry Intelligence for High-Performance EV Batteries
           </p>
         </div>
-        
+
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          {/* Loading State Indicator */}
           {isLoading && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', fontSize: '12px' }} className="mono">
               <Loader2 size={14} className="animate-spin" />
               ANALYZING TELEMETRY...
             </div>
           )}
-          
-          <button 
+
+          <button
             onClick={() => setIsLive(!isLive)}
             className={`btn-live ${isLive ? 'active' : ''}`}
           >
@@ -236,11 +290,11 @@ const App = () => {
       {/* Error Banner */}
       <AnimatePresence>
         {error && (
-          <motion.div 
-            initial={{ opacity: 0, y: -10, height: 0 }} 
-            animate={{ opacity: 1, y: 0, height: 'auto' }} 
+          <motion.div
+            initial={{ opacity: 0, y: -10, height: 0 }}
+            animate={{ opacity: 1, y: 0, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="glass-panel" 
+            className="glass-panel"
             style={{ borderColor: 'rgba(239, 68, 68, 0.5)', background: 'rgba(239, 68, 68, 0.1)', marginBottom: '24px', display: 'flex', alignItems: 'center', gap: '16px' }}
           >
             <WifiOff color="#ef4444" size={28} />
@@ -254,7 +308,7 @@ const App = () => {
 
       {/* Main Dashboard Grid */}
       <div className="grid-layout">
-        
+
         {/* Left Column: Controls & Vehicle */}
         <div className="col-flex">
           <div className="glass-panel">
@@ -262,44 +316,44 @@ const App = () => {
               <Navigation size={20} color="var(--text-muted)" />
               Live Telemetry Input
             </h2>
-            <TelemetryControl 
-              telemetry={telemetry} 
-              onChange={handleInputChange} 
+            <TelemetryControl
+              telemetry={telemetry}
+              onChange={handleInputChange}
               disabled={isLive}
             />
           </div>
 
           <div className="glass-panel" style={{ flex: 1, position: 'relative', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-             <h3 className="vehicle-label mono">Chassis Systems</h3>
-             <VehicleGraphic severity={predictionData?.battery_condition || 'Healthy'} />
-             {predictionData && (
-               <div style={{ position: 'absolute', bottom: '24px', left: '24px', right: '24px', display: 'flex', justifyContent: 'space-between' }}>
-                 <div className="vehicle-stress mono">
-                    <p style={{ color: 'var(--text-muted)', fontSize: '10px' }}>CYCLE AGING</p>
-                    <p className="ai-card-value text-accent">
-                      {telemetry.cycle}
-                      <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '4px' }}>cycles</span>
-                    </p>
-                 </div>
-                 <div className="vehicle-stress mono" style={{ textAlign: 'right' }}>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '10px' }}>CAPACITY FADE</p>
-                    <p className="ai-card-value text-orange">
-                      {telemetry.capacity.toFixed(2)}
-                      <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '4px' }}>Ah</span>
-                    </p>
-                 </div>
-               </div>
-             )}
+            <h3 className="vehicle-label mono">Chassis Systems</h3>
+            <VehicleGraphic severity={predictionData?.battery_condition || 'Healthy'} />
+            {predictionData && (
+              <div style={{ position: 'absolute', bottom: '24px', left: '24px', right: '24px', display: 'flex', justifyContent: 'space-between' }}>
+                <div className="vehicle-stress mono">
+                  <p style={{ color: 'var(--text-muted)', fontSize: '10px' }}>CYCLE AGING</p>
+                  <p className="ai-card-value text-accent" style={{ fontSize: '1.5rem' }}>
+                    {telemetry.cycle}
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '4px' }}>cycles</span>
+                  </p>
+                </div>
+                <div className="vehicle-stress mono" style={{ textAlign: 'right' }}>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '10px' }}>CAPACITY FADE</p>
+                  <p className="ai-card-value text-orange" style={{ fontSize: '1.5rem' }}>
+                    {telemetry.capacity.toFixed(2)}
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '4px' }}>Ah</span>
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Middle Column: AI Intelligence & Trends */}
+        {/* Right Column: AI Intelligence & Charts */}
         <div className="col-flex">
           {predictionData && <AIIntelligence predictionData={predictionData} />}
-          
-          {/* Recharts Visualization */}
+
+          {/* Charts */}
           <div className="glass-panel" style={{ flex: 1 }}>
-             <h2 className="panel-title">
+            <h2 className="panel-title">
               <Activity size={20} color="var(--text-muted)" />
               Real-Time Degradation Forecast
             </h2>
@@ -308,15 +362,17 @@ const App = () => {
         </div>
       </div>
 
-      {/* Alerts & Recommendations Bottom Section */}
+      {/* Telemetry Monitor Section */}
+      <TelemetryMonitor telemetry={telemetry} predictionData={predictionData} />
+
+      {/* Alerts & Recommendations */}
       <AnimatePresence>
         {predictionData && (predictionData.alerts.length > 0 || predictionData.recommendations.length > 0) && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             className="alerts-grid"
           >
-            {/* Alerts */}
             {predictionData.alerts.length > 0 && (
               <div className={`glass-panel alert-box ${predictionData.battery_condition === 'Critical' ? 'critical' : ''}`}>
                 <h3 className="panel-title text-red">
@@ -325,8 +381,8 @@ const App = () => {
                 </h3>
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
                   {predictionData.alerts.map((alert, i) => (
-                    <motion.div 
-                      key={i}
+                    <motion.div
+                      key={`${i}-${alert}`}
                       initial={{ opacity: 0, x: -10 }}
                       animate={{ opacity: 1, x: 0 }}
                       className={`alert-item ${alert.toLowerCase().includes('warning') ? 'warning' : ''}`}
@@ -338,7 +394,6 @@ const App = () => {
               </div>
             )}
 
-            {/* Recommendations */}
             {predictionData.recommendations.length > 0 && (
               <div className="glass-panel">
                 <h3 className="panel-title">
@@ -347,8 +402,8 @@ const App = () => {
                 </h3>
                 <div>
                   {predictionData.recommendations.map((rec, i) => (
-                    <motion.div 
-                      key={i}
+                    <motion.div
+                      key={`${i}-${rec}`}
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ delay: i * 0.1 }}
