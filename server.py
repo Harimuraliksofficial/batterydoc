@@ -14,6 +14,15 @@ from datetime import datetime
 # 1. SETUP & CONFIGURATION
 # ─────────────────────────────────────────────────────────────────
 
+import requests
+
+# ====================================================================
+# ESP32 CONFIGURATION
+# Paste the ESP32 IP address below. This becomes the single source of truth.
+# ====================================================================
+ESP32_API_URL = "http://10.208.217.123/api/data"
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -357,29 +366,69 @@ def get_latest():
     """
     FRONTEND AUTO-SYNC ENDPOINT.
     
-    The React frontend polls this endpoint every 2 seconds
-    to get the latest ESP32 telemetry + AI prediction.
-    
-    Returns merged telemetry + prediction JSON, or null fields
-    if no ESP32 data has arrived yet.
-    
-    Flow:
-      ESP32 → POST /telemetry → stores in memory
-      React → GET /latest → reads from memory → updates dashboard
+    The React frontend polls this endpoint every 2 seconds.
+    This endpoint actively fetches from the ESP32 IP, runs the AI model,
+    and returns the merged result.
     """
-    if latest_telemetry and latest_prediction:
-        # Merge telemetry + prediction for the frontend
-        result = {**latest_telemetry, **latest_prediction}
-        logger.info(f"📤 /latest → SOH={latest_prediction['soh_prediction']}%, ESP32 connected")
-        return result
-    else:
-        # No ESP32 data yet — return a status message
-        logger.info("📤 /latest → No ESP32 data yet")
-        return {
-            "status": "waiting_for_esp32",
-            "message": "No ESP32 telemetry received yet. Ensure ESP32 is sending to POST /telemetry.",
-            "esp32_connected": False,
+    global latest_telemetry, latest_prediction, esp32_connected, last_esp32_timestamp
+    try:
+        # 1. Fetch real hardware data from ESP32 IP
+        response = requests.get(ESP32_API_URL, timeout=2.0)
+        response.raise_for_status()
+        raw_data = response.json()
+        
+        # 2. Map payload for backend
+        internal_data = TelemetryInput(
+            voltage=raw_data.get('voltage', 0.0),
+            current=raw_data.get('current', 0.0),
+            temperature=raw_data.get('temperature', 0.0),
+            battery_percentage=raw_data.get('battery_percentage', 0.0),
+            humidity=raw_data.get('humidity', 0.0),
+            cycle_num=raw_data.get('cycle_num', raw_data.get('cycle', 0)),
+            capacity_ah=raw_data.get('capacity_ah', raw_data.get('capacity', 0.0)),
+        )
+
+        # 3. Run AI prediction
+        prediction = run_prediction(internal_data)
+
+        # 4. Update memory state
+        esp32_connected = True
+        last_esp32_timestamp = datetime.now().isoformat()
+        
+        latest_telemetry = {
+            "voltage": internal_data.voltage,
+            "current": internal_data.current,
+            "temperature": internal_data.temperature,
+            "battery_percentage": internal_data.battery_percentage,
+            "humidity": internal_data.humidity,
+            "cycle_num": internal_data.cycle_num,
+            "capacity_ah": internal_data.capacity_ah,
+            "timestamp": last_esp32_timestamp,
         }
+        latest_prediction = prediction
+
+        # 5. Append to history (keep last 50 entries)
+        history_entry = {**latest_telemetry, **prediction, "time": datetime.now().strftime("%H:%M:%S")}
+        telemetry_history.append(history_entry)
+        if len(telemetry_history) > 50:
+            telemetry_history.pop(0)
+
+        logger.info(f"📤 /latest (ESP32 FETCH) → SOH={prediction['soh_prediction']}%, ESP32 connected")
+        return {**latest_telemetry, **prediction}
+
+    except Exception as e:
+        logger.warning(f"❌ Could not fetch from ESP32: {e}")
+        esp32_connected = False
+        # Fall back to returning memory state if available, or status
+        if latest_telemetry and latest_prediction:
+            result = {**latest_telemetry, **latest_prediction}
+            return result
+        else:
+            return {
+                "status": "waiting_for_esp32",
+                "message": f"No ESP32 telemetry received yet. Checked {ESP32_API_URL}.",
+                "esp32_connected": False,
+            }
 
 # ── ENDPOINT 4: Full telemetry history ───────────────────────────
 

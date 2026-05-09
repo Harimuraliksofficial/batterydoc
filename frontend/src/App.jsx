@@ -14,7 +14,7 @@ import { Wifi } from 'lucide-react';
 // Paste your ESP32's IP address here. Include "http://"
 // Example: "http://192.168.1.15" or "http://192.168.1.15/data"
 // ============================================================================
-const ESP32_IP = "http://192.168.1.X";
+const ESP32_IP = "http://10.208.217.123/api/data";
 
 
 // ─────────────────────────────────────────────────────────────
@@ -180,61 +180,48 @@ const App = () => {
         }
       } else if (telemetryMode === 'esp32') {
         // ====================================================================
-        // [TASK 3] REAL ESP32 TELEMETRY FETCHING
-        // Connects to the ESP32 IP address, gets real JSON telemetry,
-        // and sends it into the existing backend prediction pipeline.
+        // [TASK 3 & 4] REAL ESP32 TELEMETRY FETCHING VIA BACKEND
+        // The backend fetches directly from ESP32, runs AI prediction, 
+        // and serves the merged result at /latest.
         // ====================================================================
         try {
           setError(null);
-          // 1. Fetch real hardware data from ESP32 IP
-          const espResponse = await axios.get(ESP32_IP, { timeout: 3000 });
-          const rawData = espResponse.data;
+          
+          const latestResponse = await api.get('/latest');
+          const data = latestResponse.data;
 
-          console.log("[ESP32 LIVE MODE] RAW HARDWARE DATA", rawData);
+          if (data.status === 'waiting_for_esp32') {
+            throw new Error(data.message);
+          }
 
-          // 2. Prepare payload mapping for backend
-          const payload = {
-            voltage: rawData.voltage || 0,
-            current: rawData.current || 0,
-            temperature: rawData.temperature || 0,
-            battery_percentage: rawData.battery_percentage || 0,
-            humidity: rawData.humidity || 0,
-            cycle_num: rawData.cycle || 0,
-            capacity_ah: rawData.capacity || 0,
-          };
+          console.log("[ESP32 LIVE MODE] REAL BACKEND TELEMETRY", data);
 
-          // 3. Send real telemetry into existing backend prediction flow
-          const predictionResponse = await api.post('/predict', payload);
-          const aiData = predictionResponse.data;
-
-          console.log("[ESP32 LIVE MODE] BACKEND PREDICTION", aiData);
-
-          // 4. Update frontend using REAL ESP32 data + AI Prediction
+          // Update frontend using REAL ESP32 data + AI Prediction
           const updatedTelemetry = {
-            voltage: payload.voltage,
-            current: payload.current,
-            temperature: payload.temperature,
-            battery_percentage: payload.battery_percentage,
-            humidity: payload.humidity,
-            cycle: payload.cycle_num,
-            capacity: payload.capacity_ah,
+            voltage: data.voltage,
+            current: data.current,
+            temperature: data.temperature,
+            battery_percentage: data.battery_percentage,
+            humidity: data.humidity,
+            cycle: data.cycle_num,
+            capacity: data.capacity_ah,
           };
 
           setTelemetry(updatedTelemetry);
-          setPredictionData(aiData);
+          setPredictionData(data);
 
           const newPoint = {
             time: new Date().toLocaleTimeString(),
             ...updatedTelemetry,
-            soh_prediction: aiData.soh_prediction,
-            degradation_percentage: aiData.degradation_percentage,
-            estimated_rul: aiData.estimated_rul,
+            soh_prediction: data.soh_prediction,
+            degradation_percentage: data.degradation_percentage,
+            estimated_rul: data.estimated_rul,
           };
           setHistory(prev => [...prev.slice(-19), newPoint]);
 
         } catch (err) {
           console.error("❌ ESP32 Connection Error:", err.message);
-          setError(`ESP32 Unreachable at ${ESP32_IP}. Falling back to manual mode.`);
+          setError(`ESP32 Backend Sync Error. Falling back to manual mode.`);
           setTelemetryMode('manual');
         }
       }
