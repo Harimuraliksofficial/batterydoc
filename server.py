@@ -81,16 +81,6 @@ class TelemetryInput(BaseModel):
     cycle_num: int
     capacity_ah: float
 
-class ESP32TelemetryInput(BaseModel):
-    """Telemetry payload from ESP32 hardware.
-    Uses cycle / capacity as the ESP32 sends them."""
-    voltage: float
-    current: float
-    temperature: float
-    battery_percentage: float
-    humidity: float
-    cycle: int
-    capacity: float
 
 class PredictionResponse(BaseModel):
     """JSON response sent back to the frontend."""
@@ -276,7 +266,7 @@ def predict_health(data: TelemetryInput):
 # ── ENDPOINT 2: ESP32 telemetry receiver ─────────────────────────
 
 @app.post("/telemetry", tags=["ESP32 Hardware"])
-def receive_telemetry(data: ESP32TelemetryInput):
+def receive_telemetry(data: TelemetryInput):
     """
     DEDICATED ESP32 TELEMETRY RECEIVER.
     
@@ -298,8 +288,8 @@ def receive_telemetry(data: ESP32TelemetryInput):
       "temperature": 31,
       "battery_percentage": 82,
       "humidity": 45,
-      "cycle": 120,
-      "capacity": 0.91
+      "cycle_num": 120,
+      "capacity_ah": 0.91
     }
     """
     global latest_telemetry, latest_prediction, esp32_connected, last_esp32_timestamp
@@ -311,8 +301,8 @@ def receive_telemetry(data: ESP32TelemetryInput):
     logger.info(f"   Temperature: {data.temperature} °C")
     logger.info(f"   Battery %:   {data.battery_percentage} %")
     logger.info(f"   Humidity:    {data.humidity} %")
-    logger.info(f"   Cycle:       {data.cycle}")
-    logger.info(f"   Capacity:    {data.capacity} Ah")
+    logger.info(f"   Cycle:       {data.cycle_num}")
+    logger.info(f"   Capacity:    {data.capacity_ah} Ah")
 
     # Mark ESP32 as connected
     esp32_connected = True
@@ -325,8 +315,8 @@ def receive_telemetry(data: ESP32TelemetryInput):
         temperature=data.temperature,
         battery_percentage=data.battery_percentage,
         humidity=data.humidity,
-        cycle_num=data.cycle,
-        capacity_ah=data.capacity,
+        cycle_num=data.cycle_num,
+        capacity_ah=data.capacity_ah,
     )
 
     # Run AI prediction
@@ -339,8 +329,8 @@ def receive_telemetry(data: ESP32TelemetryInput):
         "temperature": data.temperature,
         "battery_percentage": data.battery_percentage,
         "humidity": data.humidity,
-        "cycle_num": data.cycle,
-        "capacity_ah": data.capacity,
+        "cycle_num": data.cycle_num,
+        "capacity_ah": data.capacity_ah,
         "timestamp": last_esp32_timestamp,
     }
 

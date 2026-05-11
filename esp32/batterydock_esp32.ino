@@ -56,8 +56,8 @@ void loop() {
     doc["temperature"]        = myTemp;
     doc["battery_percentage"] = mySoc;
     doc["humidity"]           = myHumidity;
-    doc["cycle"]              = myCycle;
-    doc["capacity"]           = myCapacity;
+    doc["cycle_num"]          = myCycle;
+    doc["capacity_ah"]        = myCapacity;
 
     String jsonPayload;
     serializeJson(doc, jsonPayload);

@@ -7,6 +7,7 @@ import AIIntelligence from './components/AIIntelligence';
 import TrendCharts from './components/TrendCharts';
 import VehicleGraphic from './components/VehicleGraphic';
 import TelemetryMonitor from './components/TelemetryMonitor';
+import MLReportGraph from './components/MLReportGraph';
 import { Wifi } from 'lucide-react';
 
 // ============================================================================
@@ -180,48 +181,66 @@ const App = () => {
         }
       } else if (telemetryMode === 'esp32') {
         // ====================================================================
-        // [TASK 3 & 4] REAL ESP32 TELEMETRY FETCHING VIA BACKEND
-        // The backend fetches directly from ESP32, runs AI prediction, 
-        // and serves the merged result at /latest.
+        // [TASK] Direct Frontend Fetch & ML Pipeline
+        // Fetch from ESP32 endpoint directly, then push to backend ML /predict
         // ====================================================================
         try {
           setError(null);
           
-          const latestResponse = await api.get('/latest');
-          const data = latestResponse.data;
-
-          if (data.status === 'waiting_for_esp32') {
-            throw new Error(data.message);
+          // 1. Fetch live sensor data directly from the telemetry endpoint
+          const telemetryResponse = await axios.get(ESP32_IP, { timeout: 3000 });
+          const rawData = telemetryResponse.data;
+          
+          if (!rawData || Object.keys(rawData).length === 0) {
+            throw new Error("Empty response from telemetry endpoint");
           }
 
-          console.log("[ESP32 LIVE MODE] REAL BACKEND TELEMETRY", data);
+          console.log("[ESP32 LIVE MODE] RAW SENSOR DATA", rawData);
 
-          // Update frontend using REAL ESP32 data + AI Prediction
+          // 2. Prepare payload for the ML predict endpoint
+          const payload = {
+            voltage: rawData.voltage || telemetry.voltage,
+            current: rawData.current || telemetry.current,
+            temperature: rawData.temperature || telemetry.temperature,
+            battery_percentage: rawData.battery_percentage || telemetry.battery_percentage,
+            humidity: rawData.humidity || telemetry.humidity,
+            cycle_num: rawData.cycle_num || rawData.cycle || telemetry.cycle,
+            capacity_ah: rawData.capacity_ah || rawData.capacity || telemetry.capacity,
+          };
+
+          // 3. Make request to the ML endpoint
+          const predictionResponse = await api.post('/predict', payload);
+          const mlReport = predictionResponse.data;
+          
+          console.log("[ESP32 LIVE MODE] ML REPORT", mlReport);
+
+          // 4. Update UI state with merged data
           const updatedTelemetry = {
-            voltage: data.voltage,
-            current: data.current,
-            temperature: data.temperature,
-            battery_percentage: data.battery_percentage,
-            humidity: data.humidity,
-            cycle: data.cycle_num,
-            capacity: data.capacity_ah,
+            voltage: payload.voltage,
+            current: payload.current,
+            temperature: payload.temperature,
+            battery_percentage: payload.battery_percentage,
+            humidity: payload.humidity,
+            cycle: payload.cycle_num,
+            capacity: payload.capacity_ah,
           };
 
           setTelemetry(updatedTelemetry);
-          setPredictionData(data);
+          setPredictionData(mlReport);
 
           const newPoint = {
             time: new Date().toLocaleTimeString(),
             ...updatedTelemetry,
-            soh_prediction: data.soh_prediction,
-            degradation_percentage: data.degradation_percentage,
-            estimated_rul: data.estimated_rul,
+            soh_prediction: mlReport.soh_prediction,
+            degradation_percentage: mlReport.degradation_percentage,
+            estimated_rul: mlReport.estimated_rul,
           };
+          
           setHistory(prev => [...prev.slice(-19), newPoint]);
 
         } catch (err) {
-          console.error("❌ ESP32 Connection Error:", err.message);
-          setError(`ESP32 Backend Sync Error. Falling back to manual mode.`);
+          console.error("❌ Telemetry Pipeline Error:", err.message);
+          setError(`Telemetry connection failed: ${err.message}. Falling back to manual mode.`);
           setTelemetryMode('manual');
         }
       }
@@ -374,6 +393,7 @@ const App = () => {
         {/* Right Column: AI Intelligence & Charts */}
         <div className="col-flex">
           {predictionData && <AIIntelligence predictionData={predictionData} />}
+          {predictionData && <MLReportGraph predictionData={predictionData} />}
 
           {/* Charts */}
           <div className="glass-panel" style={{ flex: 1 }}>

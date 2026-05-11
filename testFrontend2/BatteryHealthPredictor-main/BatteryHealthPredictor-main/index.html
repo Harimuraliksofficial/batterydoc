@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced BMS Dashboard v3.0</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #08080a;
+            --card-bg: #121217;
+            --accent: #00f2ff;
+            --warning: #ff3e3e;
+            --success: #00ff88;
+            --text-main: #ffffff;
+            --text-dim: #666;
+            --border: #1f1f26;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text-main);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+
+        h2 {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent);
+            margin: 30px 0 15px 0;
+        }
+
+        /* Dashboard Grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 15px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            min-height: 110px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .label {
+            color: var(--text-dim);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .value-box {
+            display: flex;
+            align-items: baseline;
+            gap: 5px;
+        }
+
+        .value {
+            font-size: 1.8rem;
+            font-weight: bold;
+        }
+
+        .unit {
+            color: var(--accent);
+            font-size: 0.9rem;
+        }
+
+        /* Specialty Colors */
+        .health-good { color: var(--success); }
+        .health-warn { color: var(--warning); }
+        .dim { color: var(--text-dim); font-size: 0.8rem; }
+
+        /* Prediction Card Styling */
+        .predictive-card {
+            background: linear-gradient(145deg, #121217, #1a1a25);
+            border-left: 4px solid var(--accent);
+        }
+
+        /* AI Insights Section */
+        .insights-panel {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .condition-badge {
+            display: inline-block;
+            padding: 6px 18px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 10px;
+        }
+        .condition-good    { background: rgba(0,255,136,0.12); color: var(--success); border: 1px solid var(--success); }
+        .condition-warning { background: rgba(255,200,0,0.12); color: #ffc800; border: 1px solid #ffc800; }
+        .condition-bad     { background: rgba(255,62,62,0.12);  color: var(--warning); border: 1px solid var(--warning); }
+
+        .insight-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .insight-list li {
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            border-radius: 8px;
+            font-size: 0.82rem;
+            line-height: 1.4;
+        }
+        .alert-item {
+            background: rgba(255,62,62,0.08);
+            border-left: 3px solid var(--warning);
+            color: #ff9a9a;
+        }
+        .rec-item {
+            background: rgba(0,242,255,0.06);
+            border-left: 3px solid var(--accent);
+            color: #b0f0ff;
+        }
+        .insight-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .insight-card h3 {
+            margin: 0 0 10px 0;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-dim);
+        }
+        .ml-status {
+            font-size: 0.65rem;
+            color: var(--text-dim);
+            margin-top: 8px;
+            text-align: right;
+        }
+        .ml-status.online  { color: var(--success); }
+        .ml-status.offline { color: var(--warning); }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div>
+            <h1 style="margin:0; font-size: 1.5rem;">BATT-OS <span style="font-weight:200;">CORE</span></h1>
+            <div style="font-size:0.7rem; color:var(--text-dim);">LIVE ANALYTICS ENGINE ENABLED</div>
+        </div>
+        <div id="status-tag" style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--success); color: var(--success); font-size: 0.7rem;">SYSTEM NOMINAL</div>
+    </div>
+
+    <!-- Section 1: Physical Telemetry -->
+    <h2>Physical Telemetry</h2>
+    <div class="grid">
+        <div class="card">
+            <div class="label">Battery Voltage</div>
+            <div class="value-box"><span id="v" class="value">--</span><span class="unit">V</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Charge Current</div>
+            <div class="value-box"><span id="a" class="value">--</span><span class="unit">A</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Internal Temp</div>
+            <div class="value-box"><span id="t" class="value">--</span><span class="unit">°C</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Enclosure Humidity</div>
+            <div class="value-box"><span id="h" class="value">--</span><span class="unit">%</span></div>
+        </div>
+    </div>
+
+    <!-- Section 2: Energy & Fuel Gauge -->
+    <h2>Energy & Capacity</h2>
+    <div class="grid">
+        <div class="card">
+            <div class="label">State of Charge (SOC)</div>
+            <div class="value-box"><span id="soc" class="value">--</span><span class="unit">%</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Charge Left (Estimated)</div>
+            <div class="value-box"><span id="mah" class="value">--</span><span class="unit">mAh</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Total Discharged</div>
+            <div class="value-box"><span id="wh" class="value">--</span><span class="unit">Wh</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Design Capacity</div>
+            <div class="value-box"><span id="cap" class="value">2000</span><span class="unit">mAh</span></div>
+        </div>
+    </div>
+
+    <!-- Section 3: Smart Health & Future Prediction -->
+    <h2>Predictive Analytics (RUL)</h2>
+    <div class="grid">
+        <div class="card predictive-card">
+            <div class="label">State of Health (SOH)</div>
+            <div class="value-box"><span id="soh" class="value health-good">--</span><span class="unit">%</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Throughput Cycles</div>
+            <div class="value-box"><span id="cyc" class="value">--</span><span class="unit">Cycles</span></div>
+        </div>
+        <div class="card">
+            <div class="label">Degradation Amount</div>
+            <div class="value-box" style="color:var(--warning);"><span id="deg" class="value">--</span><span class="unit">%</span></div>
+        </div>
+        <div class="card predictive-card">
+            <div class="label">Estimated RUL</div>
+            <div class="value-box"><span id="rul" class="value">--</span><span class="unit">Cycles Left</span></div>
+        </div>
+    </div>
+
+    <!-- Section 4: AI Insights from ML Backend -->
+    <h2>AI Insights <span id="ml-status" class="ml-status">⏳ waiting…</span></h2>
+    <div style="margin-bottom:12px;">
+        <span id="condition-badge" class="condition-badge condition-good">--</span>
+    </div>
+    <div class="insights-panel">
+        <div class="insight-card">
+            <h3>⚠ Alerts</h3>
+            <ul id="alerts-list" class="insight-list">
+                <li class="alert-item" style="color:var(--text-dim);">No alerts yet</li>
+            </ul>
+        </div>
+        <div class="insight-card">
+            <h3>💡 Recommendations</h3>
+            <ul id="recs-list" class="insight-list">
+                <li class="rec-item" style="color:var(--text-dim);">Waiting for prediction…</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // ── Globals ──────────────────────────────────────────────
+        const ML_API = 'http://127.0.0.1:8000/predict';
+        let latestEspData = null;   // populated by fetchSystemData()
+
+        // Silent Update Helper
+        function updateIfDifferent(id, newVal) {
+            const el = document.getElementById(id);
+            if (el && el.innerText !== String(newVal)) {
+                el.innerText = newVal;
+            }
+        }
+
+        // ── 1. ESP Telemetry Fetch (every 1 s) ──────────────────
+        async function fetchSystemData() {
+            try {
+                const response = await fetch('http://127.0.0.1:5000/status');
+                const d = await response.json();
+                
+                if (d.error) {
+                    throw new Error(d.error);
+                }
+
+                // Store latest values for the ML predictor
+                latestEspData = d;
+
+                // Telemetry
+                updateIfDifferent('v', d.voltage.toFixed(2));
+                updateIfDifferent('a', d.current.toFixed(3));
+                updateIfDifferent('t', d.temp.toFixed(1));
+                updateIfDifferent('h', (d.humidity ?? 0).toFixed(1));
+
+                // Energy
+                updateIfDifferent('soc', d.soc);
+                updateIfDifferent('mah', Math.round(d.charge_left));
+                updateIfDifferent('wh', (d.energy_discharged ?? 0).toFixed(4));
+
+                // Status Tag Warning
+                const tag = document.getElementById('status-tag');
+                if (d.temp > 45 || d.soc < 15) {
+                    tag.innerText = "WARNING: CHECK SYSTEM";
+                    tag.style.borderColor = "var(--warning)";
+                    tag.style.color = "var(--warning)";
+                } else {
+                    tag.innerText = "SYSTEM NOMINAL";
+                    tag.style.borderColor = "var(--success)";
+                    tag.style.color = "var(--success)";
+                }
+
+            } catch (err) {
+                document.getElementById('status-tag').innerText = "CONNECTION LOST";
+                console.error("Telemetry Link Offline.");
+            }
+        }
+
+        // ── 2. ML Prediction Fetch (every 2 s) ──────────────────
+        async function fetchPrediction() {
+            if (!latestEspData) return;  // wait until first ESP read
+
+            const d = latestEspData;
+
+            // Build request body matching TelemetryInput schema
+            const payload = {
+                voltage:            d.voltage   ?? 0,
+                current:            d.current   ?? 0,
+                temperature:        d.temp      ?? 0,
+                battery_percentage: d.soc       ?? 0,
+                humidity:           d.humidity   ?? 0,
+                cycle_num:          d.cycles    ?? 0,
+                capacity_ah:        (d.charge_left ?? 0) / 1000   // mAh → Ah
+            };
+
+            try {
+                const res = await fetch(ML_API, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const p = await res.json();
+
+                // ── Update Predictive Analytics cards ─────────────
+                updateIfDifferent('soh', p.soh_prediction.toFixed(1));
+                updateIfDifferent('deg', p.degradation_percentage.toFixed(3));
+                updateIfDifferent('rul', p.estimated_rul);
+                updateIfDifferent('cyc', (d.cycles ?? 0).toFixed(2));
+
+                // SOH coloring
+                const sohEl = document.getElementById('soh');
+                sohEl.className = p.soh_prediction < 85
+                    ? 'value health-warn'
+                    : 'value health-good';
+
+                // ── Condition badge ──────────────────────────────
+                const badge = document.getElementById('condition-badge');
+                badge.innerText = p.battery_condition;
+                const cond = p.battery_condition.toLowerCase();
+                if (cond.includes('good') || cond.includes('healthy') || cond.includes('excellent')) {
+                    badge.className = 'condition-badge condition-good';
+                } else if (cond.includes('critical') || cond.includes('bad') || cond.includes('fail') || cond.includes('replace')) {
+                    badge.className = 'condition-badge condition-bad';
+                } else {
+                    badge.className = 'condition-badge condition-warning';
+                }
+
+                // ── Alerts list ──────────────────────────────────
+                const alertsUl = document.getElementById('alerts-list');
+                if (p.alerts && p.alerts.length > 0) {
+                    alertsUl.innerHTML = p.alerts
+                        .map(a => `<li class="alert-item">⚠ ${a}</li>`)
+                        .join('');
+                } else {
+                    alertsUl.innerHTML = '<li class="alert-item" style="color:var(--success);">✓ No active alerts</li>';
+                }
+
+                // ── Recommendations list ─────────────────────────
+                const recsUl = document.getElementById('recs-list');
+                if (p.recommendations && p.recommendations.length > 0) {
+                    recsUl.innerHTML = p.recommendations
+                        .map(r => `<li class="rec-item">→ ${r}</li>`)
+                        .join('');
+                } else {
+                    recsUl.innerHTML = '<li class="rec-item" style="color:var(--text-dim);">No recommendations</li>';
+                }
+
+                // ── ML status indicator ──────────────────────────
+                const mlTag = document.getElementById('ml-status');
+                mlTag.innerText = '● ML ONLINE';
+                mlTag.className = 'ml-status online';
+
+            } catch (err) {
+                console.error('ML Prediction error:', err);
+                const mlTag = document.getElementById('ml-status');
+                mlTag.innerText = '● ML OFFLINE';
+                mlTag.className = 'ml-status offline';
+            }
+        }
+
+        // ── Timers ────────────────────────────────────────────────
+        setInterval(fetchSystemData, 1000);   // ESP every 1 s
+        setInterval(fetchPrediction,  2000);   // ML  every 2 s
+    </script>
+</body>
+</html>\
